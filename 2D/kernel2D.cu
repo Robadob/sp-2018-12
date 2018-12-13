@@ -1,3 +1,7 @@
+/**
+ *	Based off earlier start from:
+ *	https://github.com/Robadob/SP-Bench/commit/35dcbb81cc0b73cdb6b08fb622f13e688a878133
+ */
 #define _CRT_SECURE_NO_WARNINGS
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -47,10 +51,16 @@ void log(std::ofstream &f,
 __device__ __constant__ unsigned int d_agentCount;
 __device__ __constant__ float d_environmentWidth_float;
 __device__ __constant__ unsigned int d_gridDim;
+glm::uvec2 GRID_DIMS;
 __device__ __constant__ float d_gridDim_float;
 __device__ __constant__ float d_RADIUS;
 __device__ __constant__ float d_R_SIN_45;
 __device__ __constant__ float d_binWidth;
+
+//For thread block max bin check
+unsigned int *d_PBM_max_count;
+unsigned int PBM_max_count = 0;
+unsigned int PBM_max_Moore_count = 0;//Unclear of why this exists
 
 texture<float2> d_texMessages;
 texture<unsigned int> d_texPBM;
@@ -113,6 +123,21 @@ __global__ void reorderLocationMessages(
 	//Order messages into swap space
 	ordered_messages[sorted_index] = unordered_messages[index];
 }
+int requiredSM(int blockSize)
+{
+	cudaDeviceProp dp;
+	int device;
+	cudaGetDevice(&device);
+	memset(&dp, sizeof(cudaDeviceProp), 0);
+	cudaGetDeviceProperties(&dp, device);
+	//We could use dp.sharedMemPerBlock/N to improve occupancy
+	return (int)min(PBM_max_Moore_count * sizeof(float2), dp.sharedMemPerBlock);//Need to limit this to the max SM
+}
+/**
+ * Kernel must be launched 1 block per bin
+ * This removes the necessity of __launch_bounds__(64) as all threads in block are touching the same messages
+ * However we end up with alot of (mostly) idle threads if one bin dense, others empty.
+ */
 __global__ void __launch_bounds__(64) neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 {
 #define STRIPS
@@ -183,6 +208,8 @@ out[index] = average;
 out[index] = pos + average;
 #endif
 }
+
+
 __global__ void unsortMessages(
 	unsigned int* bin_index,
 	unsigned int* bin_sub_index,
@@ -276,7 +303,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		//Decide bin width (as a ratio to radius)
 		const float BIN_WIDTH = RADIUS*binRatio;
 		float GRID_DIMS_float = ENV_WIDTH / BIN_WIDTH;
-		const glm::uvec2 GRID_DIMS = glm::uvec2((unsigned int)ceil(GRID_DIMS_float));
+		GRID_DIMS = glm::uvec2((unsigned int)ceil(GRID_DIMS_float));
 		CUDA_CALL(cudaMemcpyToSymbol(d_binWidth, &BIN_WIDTH, sizeof(float)));
 		CUDA_CALL(cudaMemcpyToSymbol(d_gridDim, &GRID_DIMS.x, sizeof(unsigned int)));
 		CUDA_CALL(cudaMemcpyToSymbol(d_gridDim_float, &GRID_DIMS_float, sizeof(float)));
@@ -292,6 +319,9 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		unsigned int *d_PBM = nullptr;
 		CUDA_CALL(cudaMalloc(&d_PBM_counts, (BIN_COUNT + 1) * sizeof(unsigned int)));
 		CUDA_CALL(cudaMalloc(&d_PBM, (BIN_COUNT + 1) * sizeof(unsigned int)));
+		//Prep for threadblocks
+		CUDA_CALL(cudaMalloc(&d_PBM_max_count, sizeof(unsigned int)));
+		CUDA_CALL(cudaMemset(d_PBM_max_count, 0, sizeof(unsigned int)));
 		{//Resize cub temp if required
 			size_t bytesCheck;
 			cub::DeviceScan::ExclusiveSum(nullptr, bytesCheck, d_PBM, d_PBM_counts, BIN_COUNT + 1);
@@ -336,6 +366,12 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 				//Copy messages from d_messages to d_messages_swap, in hash order
 				reorderLocationMessages << <gridSize, blockSize >> >(d_keys, d_vals, d_PBM, d_out, d_agents);
 				CUDA_CHECK();
+				//Calc max bin size (for threadblocks)
+				cub::DeviceReduce::Max(d_CUB_temp_storage, d_CUB_temp_storage_bytes, d_PBM_counts, d_PBM_max_count, BIN_COUNT);
+				CUDA_CALL(cudaGetLastError());
+				CUDA_CALL(cudaMemcpy(&PBM_max_count, d_PBM_max_count, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+				//Calc moore size (bin size^dims?)
+				PBM_max_Moore_count = (unsigned int)pow(PBM_max_count, 2);//2==2D
 				//Wait for return
 				CUDA_CALL(cudaDeviceSynchronize());
 			}
@@ -348,12 +384,13 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 			cudaEventRecord(start_kernel);
 			{
 				//Each message samples radial neighbours (static model)
-				int blockSize;   // The launch configurator returned block size 
-				CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blockSize, reorderLocationMessages, 32, 0));//Randomly 32
-																													 // Round up according to array size
-				int gridSize = (AGENT_COUNT + blockSize - 1) / blockSize;
+				int blockSize = PBM_max_count;   //blockSize == largest bin size
+				dim3 gridSize;
+				gridSize.x = GRID_DIMS.x;
+				gridSize.y = GRID_DIMS.y;
+				gridSize.z = 1;// GRID_DIMS.z;
 				//Copy messages from d_messages to d_messages_swap, in hash order
-				neighbourSearch << <gridSize, blockSize >> >(d_agents, d_out);
+				neighbourSearch << <gridSize, blockSize, requiredSM(blockSize) >> >(d_agents, d_out);
 				CUDA_CHECK();
 			}
 			CUDA_CALL(cudaDeviceSynchronize());
