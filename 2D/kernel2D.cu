@@ -138,75 +138,102 @@ int requiredSM(int blockSize)
  * This removes the necessity of __launch_bounds__(64) as all threads in block are touching the same messages
  * However we end up with alot of (mostly) idle threads if one bin dense, others empty.
  */
-__global__ void __launch_bounds__(64) neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
+__global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 {
-#define STRIPS
-#define CIRCLES
-	unsigned int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-	//Kill excess threads
-	if (index >= d_agentCount) return;
-	glm::vec2 pos = agents[index];
-	glm::ivec2 tGridPos;
-	glm::ivec2 topLeft = getGridPosition(pos - d_RADIUS);
-	glm::ivec2 bottomRight = getGridPosition(pos + d_RADIUS);
+	extern __shared__ float2 sm_messages[];
+
+	//My data
+	glm::ivec2 myBin = glm::ivec2(blockIdx.x, blockIdx.y);
+	unsigned int index = UINT_MAX;
+	glm::vec2 pos;
+	{
+		unsigned int binHash = getHash(myBin);
+		unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
+		unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
+		unsigned int binCount = binEnd - binStart;
+		if (threadIdx.x < binCount)
+		{
+			index = binStart + threadIdx.x;
+			pos = agents[index];			
+		}
+	}
+	//Model data
 	unsigned int count = 0;
 	glm::vec2 average = glm::vec2(0);
-	for (tGridPos.y = topLeft.y; tGridPos.y <= bottomRight.y; tGridPos.y++)
-	{//xmin to xmax
-#ifndef STRIPS
-		for (tGridPos.x = topLeft.x; tGridPos.x <= bottomRight.x; tGridPos.x++)
-		{//ymin to ymax
-		 //Find bin start and end
-			unsigned int binHash = getHash(tGridPos);
-			//if (binHash>d_gridDim*d_gridDim)
-			//{
-			//    printf("Hash: %d, gridDim: %d, pos: (%d, %d)\n", binHash, d_gridDim, tGridPos.x, tGridPos.y);
-			//}
-			unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
-			unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
-#else
-		unsigned int binHash = getHash(glm::ivec2(topLeft.x, tGridPos.y));
-		unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
-		binHash = getHash(glm::ivec2(bottomRight.x, tGridPos.y));
-		unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
-#endif
-		//Iterate messages in range
-		for (unsigned int i = binStart; i < binEnd; ++i)
+
+	//Iterate each bin in the Moore neighbourhood
+	glm::ivec2 currentBin;
+	for(int _x = -1;_x<=1;++_x)
+	{
+		currentBin.x = myBin.x + _x;
+		if (currentBin.x >= 0&& currentBin.x<d_gridDim)
 		{
-			if (i != index)//Ignore self
+			for (int _y = -1; _y <= 1; ++_y)
 			{
-				float2 message = tex1Dfetch(d_texMessages, i);
+				currentBin.y = myBin.y + _y;
+				if (currentBin.y >= 0 && currentBin.y < d_gridDim)
+				{
+					//Now we must load all messages from currentBin into shared memory
+					//WARNING: There is an unhandled edge case whereby we dont have enough shared memory, and must segment the load
+					unsigned int binHash = getHash(currentBin);
+					unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
+					unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
+					unsigned int binCount = binEnd - binStart;
+					//If this bin has a message for us to load
+					if(threadIdx.x<binCount)
+					{
+						//Load the message into shared memory
+						float2 message = tex1Dfetch(d_texMessages, threadIdx.x);
+						sm_messages[threadIdx.x] = message;
+					}
+					//Wait for all loading to be completed
+					__syncthreads();
+					//If we have a valid message...
+					if(index != UINT_MAX)
+					{
+						//Iterate the loaded messages
+						for (unsigned int i = 0; i<binCount;++i)
+						{
+							float2 message = sm_messages[i];
 #ifndef CIRCLES
-				if (distance(*(glm::vec2*)&message, pos)<d_RADIUS)
-				{
-					//message.z = pow(sqrt(sin(distance(message, pos))),3.1f);//Bonus compute
-					average += *(glm::vec2*)&message;
-					count++;
-				}
+							if (distance(*(glm::vec2*)&message, pos)<d_RADIUS)
+							{
+								//message.z = pow(sqrt(sin(distance(message, pos))),3.1f);//Bonus compute
+								average += *(glm::vec2*)&message;
+								count++;
+							}
 #else
-				glm::vec2 toLoc = (*(glm::vec2*)&message) - pos;//Difference
-				float separation = length(toLoc);
-				if (separation < d_RADIUS && separation > 0)
-				{
-					const float REPULSE_FACTOR = 0.05f;
-					float k = sinf((separation / d_RADIUS)*3.141*-2)*REPULSE_FACTOR;
-					toLoc /= separation;//Normalize (without recalculating seperation)
-					average += k * toLoc;
-					count++;
-				}
+							glm::vec2 toLoc = (*(glm::vec2*)&message) - pos;//Difference
+							float separation = length(toLoc);
+							if (separation < d_RADIUS && separation > 0)
+							{
+								const float REPULSE_FACTOR = 0.05f;
+								float k = sinf((separation / d_RADIUS)*3.141*-2)*REPULSE_FACTOR;
+								toLoc /= separation;//Normalize (without recalculating seperation)
+								average += k * toLoc;
+								count++;
+							}
 #endif
+						}
+					}
+					//Wait for all processing to be completed, so that we can proceed to next bin
+					__syncthreads();
+				}
+				//Could optimise here, by handling binHash outside the loop
+				//For this would need to iterate _y on the outside, so hashes are contiguous
 			}
 		}
-#ifndef STRIPS
-		}
+	}
+	//If we have a valid message...
+	if(index != UINT_MAX)
+	{
+		average /= count>0 ? count : 1;
+#ifndef CIRCLES
+		out[index] = average;
+#else
+		out[index] = pos + average;
 #endif
 	}
-average /= count>0 ? count : 1;
-#ifndef CIRCLES
-out[index] = average;
-#else
-out[index] = pos + average;
-#endif
 }
 
 
