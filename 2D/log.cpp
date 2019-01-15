@@ -8,22 +8,22 @@ void createLog(std::ofstream &f)
     f.open(path);
 
     //Write header
-    f << "Radius,";
-    f << "Bin Width,";
     f << "Est Radial Neighbours,";
     f << "Agent Count,";
     f << "Env Width,";
+	f << "PBM_control (ms),";
+	f << "Kernel_control (ms),";
     f << "PBM (ms),";
     f << "Kernel (ms),";
     f << "Failures,";
     f << "\n";
 }
 void log(std::ofstream &f,
-    const float &rad,
-    const float &binWidth,
     const unsigned int &estRadialNeighbours,
     const unsigned int &agentCount,
     const unsigned int &envWidth,
+	const float &PBM_control,
+	const float &kernel_control,
     const float &PBM,
     const float &kernel,
     const unsigned int &fails
@@ -31,16 +31,16 @@ void log(std::ofstream &f,
 {
     char buffer[1024];
 
-    sprintf(&buffer[0], "%f,", rad);
-    f << buffer;
-    sprintf(&buffer[0], "%f,", binWidth);
-    f << buffer;
     sprintf(&buffer[0], "%u,", estRadialNeighbours);
     f << buffer;
     sprintf(&buffer[0], "%u,", agentCount);
     f << buffer;
     sprintf(&buffer[0], "%u,", envWidth);
     f << buffer;
+	sprintf(&buffer[0], "%f,", PBM_control);
+	f << buffer;
+	sprintf(&buffer[0], "%f,", kernel_control);
+	f << buffer;
     sprintf(&buffer[0], "%f,", PBM);
     f << buffer;
     sprintf(&buffer[0], "%f,", kernel);

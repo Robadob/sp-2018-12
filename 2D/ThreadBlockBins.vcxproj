@@ -58,6 +58,7 @@
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <Include>
       </Include>
+      <CodeGeneration>compute_61,sm_61</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -80,6 +81,7 @@
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <Include>
       </Include>
+      <CodeGeneration>compute_61,sm_61</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
