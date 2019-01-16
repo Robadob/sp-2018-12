@@ -259,14 +259,17 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 		stripCounts[threadIdx.x] = binEnd - binStart;
 	}
 	__syncthreads();
+	const unsigned int TOTAL_LOAD_COUNT = stripCounts[0] + stripCounts[1] + stripCounts[2];
 	{
 		//Model data
 		unsigned int count = 0;
 		glm::vec2 average = glm::vec2(0);
 		//Loading data
 		unsigned int myStrip = 0;
-		unsigned int myLoad = threadIdx.x;
-		do
+		int myLoad = threadIdx.x;
+		//TOTAL_LOAD_COUNT: Identifies the total number of messages in the Moore neighbourhood
+		//blockLoad: Identifies the index of the first thread through the entire Moore neighbourhood of messages to be accessed
+		for(unsigned int blockLoad = 0; blockLoad<TOTAL_LOAD_COUNT; blockLoad += d_SHARED_MESSAGE_COUNT)
 		{
 			//Load the corresponding message if available
 			if(threadIdx.x<d_SHARED_MESSAGE_COUNT)
@@ -276,7 +279,12 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 				while(myLoad>stripCount&&myStrip<3)
 				{
 					myLoad -= stripCount;
-					myStrip++;
+					if(myLoad<0)
+					{
+						myStrip++;
+						while(myLoad<0)
+							myLoad += blockDim.x;
+					}
 				}
 				//If we're still valid
 				if (myStrip < 3)
@@ -292,7 +300,8 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 			//Loop all loaded messages
 			if(index != UINT_MAX)
 			{
-				for (unsigned int i = 0; i<d_SHARED_MESSAGE_COUNT; ++i)///TODO: What if total number of messages exceeds
+				unsigned int blockLeft = min(TOTAL_LOAD_COUNT - blockLoad, d_SHARED_MESSAGE_COUNT);//Either loop all messages, or remaining messages
+				for (unsigned int i = 0; i<blockLeft; ++i)
 				{
 					float2 message = sm_messages[i];
 #ifndef CIRCLES
@@ -317,9 +326,11 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 				}
 			}
 			//Wait for threads to finish using shared mem
-			///TODO: We can skip this sync on final iteration
-			__syncthreads();
-		} while (myStrip < 3);///TODO: How do we ensure that some threads dont exit 1 loop early?
+			if(blockLoad + d_SHARED_MESSAGE_COUNT<totalLoadCount)
+			{
+				__syncthreads();
+			}
+		}
 	}
 
 	//If we have a valid message...
