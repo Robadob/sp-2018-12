@@ -150,6 +150,7 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 	glm::ivec2 gridPosRelative;
 	unsigned int count = 0;
 	glm::vec2 average = glm::vec2(0);
+
 	for (gridPosRelative.y = -1; gridPosRelative.y <= 1; gridPosRelative.y++)
 	{//ymin to ymax
 		int currentBinY = gridPos.y + gridPosRelative.y;
@@ -175,7 +176,7 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 			unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
 			currentBinX = gridPos.x + 1;
 			currentBinX = currentBinX < d_gridDim ? currentBinX : d_gridDim-1;
-			binHash = getHash(gridPos+glm::ivec2(currentBinX, currentBinY));
+			binHash = getHash(glm::ivec2(currentBinX, currentBinY));
 			unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
 #endif
 			//Iterate messages in range
@@ -238,13 +239,12 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 		if (threadIdx.x < binCount)
 		{
 			index = binStart + threadIdx.x;
-			pos = agents[index];			
+			pos = agents[index];
 		}
 	}
 	//Model data
 	unsigned int count = 0;
 	glm::vec2 average = glm::vec2(0);
-
 	//Iterate each bin in the Moore neighbourhood
 	glm::ivec2 currentBin;
 	for(int _x = -1;_x<=1;++_x)
@@ -278,6 +278,9 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 						//Iterate the loaded messages
 						for (unsigned int i = 0; i<binCount;++i)
 						{
+							//Skip our own loaded message
+							if (_x == 0 & _y == 0 && i == threadIdx.x)
+								continue;
 							float2 message = sm_messages[i];
 #ifndef CIRCLES
 							if (distance(*(glm::vec2*)&message, pos)<d_RADIUS)
@@ -443,7 +446,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 			bool isControl = _j != 0;
 
 			//For 200 iterations (to produce an average)
-			const unsigned int ITERATIONS = 200;
+			const unsigned int ITERATIONS = 1;
 			for (unsigned int i = 0; i < ITERATIONS; ++i)
 			{
 				//Reset each run of average model
@@ -506,7 +509,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 					gridSize.x = GRID_DIMS.x;
 					gridSize.y = GRID_DIMS.y;
 					gridSize.z = 1;// GRID_DIMS.z;
-					 //Copy messages from d_agents to d_out, in hash order
+					//Copy messages from d_agents to d_out, in hash order
 					neighbourSearch << <gridSize, blockSize, requiredSM(blockSize) >> > (d_agents, d_out);
 					CUDA_CHECK();
 				}
@@ -552,6 +555,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 				CUDA_CALL(cudaDeviceSynchronize());
 				//Copy back to relative host array (for validation)
 				CUDA_CALL(cudaMemcpy(isControl ? h_out_control : h_out, d_out, sizeof(glm::vec2)*AGENT_COUNT, cudaMemcpyDeviceToHost));
+				CUDA_CALL(cudaDeviceSynchronize());
 			}
 		}//for(MODE)
 		CUDA_CALL(cudaUnbindTexture(d_texPBM));
@@ -612,7 +616,8 @@ int main()
 		{
 			//Run i agents in a density with roughly 60 radial neighbours, and log
 			//Within this, it is tested over a range of proportional bin widths
-			runAgents(f, i, 60);
+			runAgents(f, i, 20);
+			break;
 		}
 	}
 	printf("fin\n");
