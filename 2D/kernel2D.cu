@@ -160,6 +160,8 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 			for (gridPosRelative.x = -1; gridPosRelative.x <= 1; gridPosRelative.x++)
 			{//xmin to xmax
 				int currentBinX = gridPos.x + gridPosRelative.x;
+				if (currentBinX >= 0 && currentBinX < d_gridDim)
+				{
 				//Find bin start and end
 				unsigned int binHash = getHash(glm::ivec2(currentBinX, currentBinY));
 				//if (binHash>d_gridDim*d_gridDim)
@@ -175,7 +177,7 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 			unsigned int binHash = getHash(glm::ivec2(currentBinX, currentBinY));
 			unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
 			currentBinX = gridPos.x + 1;
-			currentBinX = currentBinX < d_gridDim ? currentBinX : d_gridDim-1;
+			currentBinX = currentBinX < d_gridDim ? currentBinX : d_gridDim - 1;
 			binHash = getHash(glm::ivec2(currentBinX, currentBinY));
 			unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
 #endif
@@ -208,6 +210,7 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 			}
 		}
 #ifndef STRIPS
+		}
 	}
 #endif
 }
