@@ -572,7 +572,6 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		printf("ThreadBlock: PBM: %.2fms, Kernel: %.2fms\n", pbmMillis, kernelMillis);
 		unsigned int fails = 0;
 #ifndef CIRCLES
-
 		{//Validation
 			//Validate results for average model
 			//thrust::sort(thrust::cuda::par, d_out, d_out + AGENT_COUNT, vec2Compare());
@@ -592,7 +591,11 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 			}
 			if (fails > 0)
 				printf("%d/%d (%.1f%%) Failed.\n", fails, AGENT_COUNT, 100 * (fails / (float)AGENT_COUNT));
+			else
+				printf("Validation passed %d/%d\n", AGENT_COUNT, AGENT_COUNT);
 		}
+#else
+		printf("Validation not ran for Circles mode.\n")
 #endif
 		log(f, AVERAGE_NEIGHBOURS, AGENT_COUNT, ENV_WIDTH, pbmMillis_control, kernelMillis_control, pbmMillis, kernelMillis, fails);
 	}
