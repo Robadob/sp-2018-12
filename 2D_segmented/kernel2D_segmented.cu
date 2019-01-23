@@ -148,8 +148,8 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 	unsigned int count = 0;
 	glm::vec2 average = glm::vec2(0);
 
-	if (index == 9)
-		printf("(%d, %d)\n", gridPos.x, gridPos.y);
+	//if (index == 9)
+	//	printf("(%d, %d)\n", gridPos.x, gridPos.y);
 	for (gridPosRelative.y = -1; gridPosRelative.y <= 1; gridPosRelative.y++)
 	{//ymin to ymax
 		int currentBinY = gridPos.y + gridPosRelative.y;
@@ -187,8 +187,8 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 					//if (gridPos.x == 3 && gridPos.y == 3)
 					//	printf("%d\n", index);
 					//if (gridPos.x == 3 && gridPos.y == 3 && index == 1058)
-					if (index == 9)
-						printf("(%.3f, %.3f)\n", message.x, message.y);
+					//if (index == 9)
+					//	printf("(%.3f, %.3f)\n", message.x, message.y);
 #ifndef CIRCLES
 					if (distance(*(glm::vec2*)&message, pos) < d_RADIUS)
 					{
@@ -275,8 +275,8 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 
 	const unsigned int TOTAL_LOAD_COUNT = stripCounts[0] + stripCounts[1] + stripCounts[2];
 
-	if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
-		printf("Total loads due: %d [%d, %d, %d]\n", TOTAL_LOAD_COUNT, stripCounts[0], stripCounts[1], stripCounts[2]);
+	//if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
+	//	printf("Total loads due: %d [%d, %d, %d]\n", TOTAL_LOAD_COUNT, stripCounts[0], stripCounts[1], stripCounts[2]);
 	{
 		//Model data
 		unsigned int count = 0;
@@ -325,8 +325,8 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 				for (unsigned int i = 0; i<blockLeft; ++i)
 				{
 					float2 message = sm_messages[i];
-					if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
-						printf("(%.3f, %.3f)\n", message.x, message.y);
+					//if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
+					//	printf("(%.3f, %.3f)\n", message.x, message.y);
 #ifndef CIRCLES
 					if (distance(*(glm::vec2*)&message, pos)<d_RADIUS)
 					{
