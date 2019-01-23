@@ -148,6 +148,8 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 	unsigned int count = 0;
 	glm::vec2 average = glm::vec2(0);
 
+	if (index == 9)
+		printf("(%d, %d)\n", gridPos.x, gridPos.y);
 	for (gridPosRelative.y = -1; gridPosRelative.y <= 1; gridPosRelative.y++)
 	{//ymin to ymax
 		int currentBinY = gridPos.y + gridPosRelative.y;
@@ -184,7 +186,8 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 					float2 message = tex1Dfetch(d_texMessages, i); 
 					//if (gridPos.x == 3 && gridPos.y == 3)
 					//	printf("%d\n", index);
-					if (gridPos.x == 3 && gridPos.y == 3 && index == 1058)
+					//if (gridPos.x == 3 && gridPos.y == 3 && index == 1058)
+					if (index == 9)
 						printf("(%.3f, %.3f)\n", message.x, message.y);
 #ifndef CIRCLES
 					if (distance(*(glm::vec2*)&message, pos) < d_RADIUS)
@@ -251,22 +254,28 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 	//We can do 6 accesses to PBM (in 2D), to identify the 3 Strips
 	if(threadIdx.x<3)
 	{
-		int currentBinX = myBin.x - 1;
-		currentBinX = currentBinX >= 0 ? currentBinX : 0;
-		unsigned int binHash = getHash(glm::ivec2(currentBinX, myBin.y+((int)threadIdx.x)-1));
-		unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
-		stripStarts[threadIdx.x] = binStart;
-		currentBinX = myBin.x + 1;
-		currentBinX = currentBinX < d_gridDim ? currentBinX : d_gridDim - 1;
-		binHash = getHash(glm::ivec2(currentBinX, myBin.y + ((int)threadIdx.x) - 1));
-		unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
-		stripCounts[threadIdx.x] = binEnd - binStart;
+		int myY = myBin.y + ((int)threadIdx.x) - 1;
+		if (myY >= 0 && myY < d_gridDim)
+		{
+			int currentBinX = myBin.x - 1;
+			currentBinX = currentBinX >= 0 ? currentBinX : 0;
+			unsigned int binHash = getHash(glm::ivec2(currentBinX, myY));
+			unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
+			stripStarts[threadIdx.x] = binStart;
+			currentBinX = myBin.x + 1;
+			currentBinX = currentBinX < d_gridDim ? currentBinX : d_gridDim - 1;
+			binHash = getHash(glm::ivec2(currentBinX, myY));
+			unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
+			stripCounts[threadIdx.x] = binEnd - binStart;
+		}
+		else
+			stripCounts[threadIdx.x] = 0;
 	}
 	__syncthreads();
 
 	const unsigned int TOTAL_LOAD_COUNT = stripCounts[0] + stripCounts[1] + stripCounts[2];
 
-	if (blockIdx.x == 3 && blockIdx.y == 3 && threadIdx.x == 0)
+	if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
 		printf("Total loads due: %d [%d, %d, %d]\n", TOTAL_LOAD_COUNT, stripCounts[0], stripCounts[1], stripCounts[2]);
 	{
 		//Model data
@@ -316,7 +325,7 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 				for (unsigned int i = 0; i<blockLeft; ++i)
 				{
 					float2 message = sm_messages[i];
-					if (blockIdx.x == 3 && blockIdx.y==3 && threadIdx.x == 0)
+					if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
 						printf("(%.3f, %.3f)\n", message.x, message.y);
 #ifndef CIRCLES
 					if (distance(*(glm::vec2*)&message, pos)<d_RADIUS)
@@ -633,7 +642,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 				if (!(ret.x&&ret.y))
 				{
 					if (fails == 0)
-						printf("(%.5f, %.5f) vs (%.5f, %.5f)\n", h_out_control[i].x, h_out_control[i].y, h_out[i].x, h_out[i].y);
+						printf("#%d: (%.5f, %.5f) vs (%.5f, %.5f)\n", i, h_out_control[i].x, h_out_control[i].y, h_out[i].x, h_out[i].y);
 					fails++;
 				}
 			}
