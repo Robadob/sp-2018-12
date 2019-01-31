@@ -15,7 +15,7 @@
 #include <texture_fetch_functions.h>
 #include <cub/cub.cuh>
 #include <glm/gtc/epsilon.hpp>
-#define EPSILON 0.005f
+#define EPSILON 0.0001f
 //#define CIRCLES
 //Cuda call
 static void HandleCUDAError(const char *file,

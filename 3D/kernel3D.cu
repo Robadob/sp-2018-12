@@ -15,7 +15,7 @@
 #include <texture_fetch_functions.h>
 #include <cub/cub.cuh>
 #include <glm/gtc/epsilon.hpp>
-#define EPSILON 0.005f
+#define EPSILON 0.0001f
 //#define CIRCLES
 //Cuda call
 static void HandleCUDAError(const char *file,
@@ -378,7 +378,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 	//const unsigned int ENV_WIDTH = 250;
 	float ENV_WIDTH_float = (float)ENV_WIDTH;
 	const unsigned int RNG_SEED = 12;
-	const unsigned int ENV_VOLUME = ENV_WIDTH * ENV_WIDTH;
+	const unsigned int ENV_VOLUME = ENV_WIDTH * ENV_WIDTH * ENV_WIDTH;
 	CUDA_CALL(cudaMemcpyToSymbol(d_agentCount, &AGENT_COUNT, sizeof(unsigned int)));
 	CUDA_CALL(cudaMemcpyToSymbol(d_environmentWidth_float, &ENV_WIDTH_float, sizeof(float)));
 	//vec4 used instead of vec3 bc texture memory reqs
@@ -408,7 +408,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 	//Decide interaction radius
 	//for a range of bin widths
 	const float RADIUS = 1.0f;//
-	const float RADIAL_VOLUME = glm::pi<float>()*RADIUS*RADIUS;
+	const float RADIAL_VOLUME = glm::pi<float>()*RADIUS*RADIUS*RADIUS*(4.0f/3.0f);
 	const unsigned int AVERAGE_NEIGHBOURS = (unsigned int)(AGENT_COUNT*RADIAL_VOLUME / ENV_VOLUME);
 	printf("Agents: %d, RVol: %.2f, Average Neighbours: %d\n", AGENT_COUNT, RADIAL_VOLUME, AVERAGE_NEIGHBOURS);
 	//{
