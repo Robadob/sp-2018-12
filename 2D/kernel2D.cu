@@ -5,6 +5,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include "cuda_profiler_api.h"
 
 #include <stdio.h>
 #include <cmath>
@@ -378,6 +379,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		unsigned int initBlocks = (AGENT_COUNT / initThreads) + 1;
 		init_curand << <initBlocks, initThreads >> >(d_rng, RNG_SEED);//Defined in CircleKernels.cuh
 		CUDA_CALL(cudaDeviceSynchronize());
+		cudaProfilerStart();//Start here because init_curand is super slow for large agent count's.
 		init_agents << <initBlocks, initThreads >> >(d_rng, d_agents_init);
 		//Free curand
 		CUDA_CALL(cudaFree(d_rng));
@@ -571,6 +573,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		printf("Control:     PBM: %.2fms, Kernel: %.2fms\n", pbmMillis_control, kernelMillis_control);
 		printf("ThreadBlock: PBM: %.2fms, Kernel: %.2fms\n", pbmMillis, kernelMillis);
 		unsigned int fails = 0;
+		cudaProfilerStop();
 #ifndef CIRCLES
 		{//Validation
 			//Validate results for average model
@@ -608,6 +611,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 	CUDA_CALL(cudaFree(d_out));
 	free(h_out);
 	free(h_out_control);
+	cudaDeviceReset();
 }
 void runAgents(std::ofstream &f, const unsigned int AGENT_COUNT, const float DENSITY)
 {
@@ -620,16 +624,17 @@ int main()
 		std::ofstream f;
 		createLog(f);
 		assert(f.is_open());
-		for (unsigned int i = 20000; i <= 3000000; i += 20000)
+		//for (unsigned int i = 20000; i <= 3000000; i += 20000)
+		for (unsigned int i = 100000; i <= 100000; i += 20000)
 		{
 			//Run i agents in a density with roughly 60 radial neighbours, and log
 			//Within this, it is tested over a range of proportional bin widths
-			runAgents(f, i, 20);
-			break;
+			runAgents(f, i, 650);
+			//break;
 		}
 	}
 	printf("fin\n");
-	getchar();
+	//getchar();
 	return 0;
 }
 

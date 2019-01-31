@@ -5,6 +5,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include "cuda_profiler_api.h"
 
 #include <stdio.h>
 #include <cmath>
@@ -63,8 +64,10 @@ unsigned int SHARED_MESSAGE_COUNT;
 
 //For thread block max bin check
 unsigned int *d_PBM_max_count;
+//unsigned int *d_PBM_max_Moore_count;
 unsigned int PBM_max_count = 0;
 unsigned int PBM_max_Moore_count = 0;
+unsigned int MAX_THREADS_PER_BLOCK = 0;
 
 texture<float2> d_texMessages;
 texture<unsigned int> d_texPBM;
@@ -183,7 +186,7 @@ __global__  void __launch_bounds__(64) neighbourSearch_control(const glm::vec2 *
 			{
 				//if (i != index)//Ignore self
 				{
-					float2 message = tex1Dfetch(d_texMessages, i); 
+					float2 message = tex1Dfetch(d_texMessages, i);
 					//if (gridPos.x == 3 && gridPos.y == 3)
 					//	printf("%d\n", index);
 					//if (gridPos.x == 3 && gridPos.y == 3 && index == 1058)
@@ -250,8 +253,7 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 		}
 	}
 	//PBM data?
-	//How do we decide which threads load which messages?
-	//We can do 6 accesses to PBM (in 2D), to identify the 3 Strips
+	//First 3 threads fill stripStarts/stripCounts, by loading data for relevant strips
 	if(threadIdx.x<3)
 	{
 		int myY = myBin.y + ((int)threadIdx.x) - 1;
@@ -284,32 +286,33 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 		//Loading data
 		unsigned int myStrip = 0;
 		int myLoad = threadIdx.x;
-		//TOTAL_LOAD_COUNT: Identifies the total number of messages in the Moore neighbourhood
+		//TOTAL_LOAD_COUNT: Identifies the total number of messages to be loaded (from the Moore neighbourhood)
 		//blockLoad: Identifies the index of the first thread through the entire Moore neighbourhood of messages to be accessed
 		for(unsigned int blockLoad = 0; blockLoad<TOTAL_LOAD_COUNT; blockLoad += d_SHARED_MESSAGE_COUNT)
 		{
 			//Load the corresponding message if available
-			if(threadIdx.x<d_SHARED_MESSAGE_COUNT)
+			if(threadIdx.x < d_SHARED_MESSAGE_COUNT && myStrip < 3)
 			{
 				//Get us pointing to a valid index in a valid strip
 				unsigned int stripCount = stripCounts[myStrip];
-				//If we exceed the index of current strip
-				while(myLoad>=stripCount&&myStrip<3)
+				//If we exceed the index of current strip, progress to next strip
+				while(myLoad>=stripCount)
 				{
 					//Reduce our index by stripCount
 					myLoad -= stripCount;
 					//Switch to next strip
 					myStrip++;
-					//updateStripCount
-					if(myStrip<3)
+					//update stripCount
+					if (myStrip < 3)
 						stripCount = stripCounts[myStrip];
+					else
+						break;//Escape we've exceeded last strip
 				}
 				//If we're still valid
 				if (myStrip < 3)
 				{
 					//Load Message
 					sm_messages[threadIdx.x] = tex1Dfetch(d_texMessages, stripStarts[myStrip] + myLoad);
-
 					//if (blockIdx.x == 3 && blockIdx.y == 3)
 					//	printf("(%.3f, %.3f) = %d:%d\n", sm_messages[threadIdx.x].x, sm_messages[threadIdx.x].y, myStrip, myLoad);
 					//Prep for next loop
@@ -420,6 +423,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		unsigned int initBlocks = (AGENT_COUNT / initThreads) + 1;
 		init_curand << <initBlocks, initThreads >> >(d_rng, RNG_SEED);//Defined in CircleKernels.cuh
 		CUDA_CALL(cudaDeviceSynchronize());
+		cudaProfilerStart();//Start here because init_curand is super slow for large agent count's.
 		init_agents << <initBlocks, initThreads >> >(d_rng, d_agents_init);
 		//Free curand
 		CUDA_CALL(cudaFree(d_rng));
@@ -446,9 +450,12 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		memset(&dp, sizeof(cudaDeviceProp), 0);
 		cudaGetDeviceProperties(&dp, device);
 		//We could use dp.sharedMemPerBlock/N to improve occupancy
+		//6uint are used for storing sync info
 		SHARED_MESSAGE_COUNT = (dp.sharedMemPerBlock-(sizeof(unsigned int)*6)) / sizeof(float2);
-		SHARED_MESSAGE_COUNT = glm::min(SHARED_MESSAGE_COUNT, 256u);
+		//Why the fuck is this capped to 256?
+		SHARED_MESSAGE_COUNT = glm::min(SHARED_MESSAGE_COUNT, 96u);//Shared mem capped to ~96 messages performs best for 60,100 radial neighbours, makes less of a difference at 200+, why?
 		CUDA_CALL(cudaMemcpyToSymbol(d_SHARED_MESSAGE_COUNT, &SHARED_MESSAGE_COUNT, sizeof(unsigned int)));
+		MAX_THREADS_PER_BLOCK = dp.maxThreadsPerBlock;
 	}
 
 	const float rSin45 = (float)(RADIUS*sin(glm::radians(45)));
@@ -480,6 +487,8 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		//Prep for threadblocks
 		CUDA_CALL(cudaMalloc(&d_PBM_max_count, sizeof(unsigned int)));
 		CUDA_CALL(cudaMemset(d_PBM_max_count, 0, sizeof(unsigned int)));
+		//CUDA_CALL(cudaMalloc(&d_PBM_max_Moore_count, sizeof(unsigned int)));
+		//CUDA_CALL(cudaMemset(d_PBM_max_Moore_count, 0, sizeof(unsigned int)));
 		{//Resize cub temp if required
 			size_t bytesCheck, bytesCheck2;
 			cub::DeviceScan::ExclusiveSum(nullptr, bytesCheck, d_PBM, d_PBM_counts, BIN_COUNT + 1);
@@ -539,8 +548,14 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 					cub::DeviceReduce::Max(d_CUB_temp_storage, d_CUB_temp_storage_bytes, d_PBM_counts, d_PBM_max_count, BIN_COUNT);
 					CUDA_CALL(cudaGetLastError());
 					CUDA_CALL(cudaMemcpy(&PBM_max_count, d_PBM_max_count, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+					assert(PBM_max_count < MAX_THREADS_PER_BLOCK);//Problems if this isn't true
 					//Calc moore size (bin size^dims?)
-					//PBM_max_Moore_count = (unsigned int)pow(PBM_max_count, 2);//2==2D//Unused, requires 9x shared mem in 2D, 27x in 3D
+					PBM_max_Moore_count = PBM_max_count*(unsigned int)pow(3, 2);//2==2D//Unused, requires 9x shared mem in 2D, 27x in 3D
+					//CUDA_CALL(cudaMemcpyToSymbol(d_PBM_max_Moore_count, &PBM_max_Moore_count, sizeof(unsigned int)));
+					//Test
+					//SHARED_MESSAGE_COUNT = glm::min(PBM_max_count, SHARED_MESSAGE_COUNT);
+					//printf("shared limit: %d\n", SHARED_MESSAGE_COUNT);
+					//CUDA_CALL(cudaMemcpyToSymbol(d_SHARED_MESSAGE_COUNT, &SHARED_MESSAGE_COUNT, sizeof(unsigned int)));
 				}
 				{//Fill PBM and Message Texture Buffers																			  
 					CUDA_CALL(cudaDeviceSynchronize());//Wait for return
@@ -627,6 +642,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		printf("Control:     PBM: %.2fms, Kernel: %.2fms\n", pbmMillis_control, kernelMillis_control);
 		printf("ThreadBlock: PBM: %.2fms, Kernel: %.2fms\n", pbmMillis, kernelMillis);
 		unsigned int fails = 0;
+		cudaProfilerStop();
 #ifndef CIRCLES
 
 		{//Validation
@@ -642,12 +658,16 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 				if (!(ret.x&&ret.y))
 				{
 					if (fails == 0)
-						printf("#%d: (%.5f, %.5f) vs (%.5f, %.5f)\n", i, h_out_control[i].x, h_out_control[i].y, h_out[i].x, h_out[i].y);
+					{
+						printf("#%d  : (%.5f, %.5f) vs (%.5f, %.5f)\n", i, h_out_control[i].x, h_out_control[i].y, h_out[i].x, h_out[i].y);
+					}
 					fails++;
 				}
 			}
 			if (fails > 0)
 				printf("%d/%d (%.1f%%) Failed.\n", fails, AGENT_COUNT, 100 * (fails / (float)AGENT_COUNT));
+			else
+				printf("Validation passed %d/%d\n", AGENT_COUNT, AGENT_COUNT);
 		}
 #endif
 		log(f, AVERAGE_NEIGHBOURS, AGENT_COUNT, ENV_WIDTH, pbmMillis_control, kernelMillis_control, pbmMillis, kernelMillis, fails);
@@ -661,6 +681,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 	CUDA_CALL(cudaFree(d_out));
 	free(h_out);
 	free(h_out_control);
+	cudaDeviceReset();
 }
 void runAgents(std::ofstream &f, const unsigned int AGENT_COUNT, const float DENSITY)
 {
@@ -673,16 +694,17 @@ int main()
 		std::ofstream f;
 		createLog(f);
 		assert(f.is_open());
-		for (unsigned int i = 20000; i <= 3000000; i += 20000)
+		//for (unsigned int i = 20000; i <= 3000000; i += 20000)
+		for (unsigned int i = 1000000; i <= 1000000; i += 20000)
 		{
 			//Run i agents in a density with roughly 60 radial neighbours, and log
 			//Within this, it is tested over a range of proportional bin widths
-			runAgents(f, i, 20);
+			runAgents(f, i, 100);
 			break;
 		}
 	}
 	printf("fin\n");
-	getchar();
+	//getchar();
 	return 0;
 }
 
