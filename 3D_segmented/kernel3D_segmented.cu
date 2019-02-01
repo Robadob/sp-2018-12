@@ -134,7 +134,7 @@ __global__ void reorderLocationMessages(
 }
 int requiredSM(int blockSize)
 {
-	return (SHARED_MESSAGE_COUNT*sizeof(float3))+(18*sizeof(unsigned int));//Need to limit this to the max SM
+	return (SHARED_MESSAGE_COUNT*sizeof(float4))+(18*sizeof(unsigned int));//Need to limit this to the max SM
 }
 /**
 * Kernel must be launched 1 block per bin
@@ -237,7 +237,7 @@ out[index].z = pos.z + average.z;
  */
 __global__ void neighbourSearch(const glm::vec4 *agents, glm::vec4 *out)
 {
-	extern __shared__ float3 sm_messages[];
+	extern __shared__ float4 sm_messages[];
 	unsigned int *stripStarts = (unsigned int *)&sm_messages[d_SHARED_MESSAGE_COUNT];
 	unsigned int *stripCounts = &stripStarts[9];
 	
@@ -329,7 +329,7 @@ __global__ void neighbourSearch(const glm::vec4 *agents, glm::vec4 *out)
 				{
 					//Load Message
 					float4 _t = tex1Dfetch(d_texMessages, stripStarts[myStrip] + myLoad);
-					sm_messages[threadIdx.x] = *(float3*)&_t;
+					sm_messages[threadIdx.x] = _t;// *(float4*)&_t;
 					//if (blockIdx.x == 3 && blockIdx.y == 3)
 					//	printf("(%.3f, %.3f) = %d:%d\n", sm_messages[threadIdx.x].x, sm_messages[threadIdx.x].y, myStrip, myLoad);
 					//Prep for next loop
@@ -344,7 +344,7 @@ __global__ void neighbourSearch(const glm::vec4 *agents, glm::vec4 *out)
 				unsigned int blockLeft = min(TOTAL_LOAD_COUNT - blockLoad, d_SHARED_MESSAGE_COUNT);//Either loop all messages, or remaining messages
 				for (unsigned int i = 0; i<blockLeft; ++i)
 				{
-					float3 message = sm_messages[i];
+					float4 message = sm_messages[i];
 					//if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
 					//	printf("(%.3f, %.3f)\n", message.x, message.y);
 #ifndef CIRCLES
@@ -473,7 +473,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		cudaGetDeviceProperties(&dp, device);
 		//We could use dp.sharedMemPerBlock/N to improve occupancy
 		//6uint are used for storing sync info
-		SHARED_MESSAGE_COUNT = (dp.sharedMemPerBlock-(sizeof(unsigned int)*18)) / sizeof(float3);
+		SHARED_MESSAGE_COUNT = (dp.sharedMemPerBlock-(sizeof(unsigned int)*18)) / sizeof(float4);
 		//Why the fuck is this capped to 256?
 		SHARED_MESSAGE_COUNT = glm::min(SHARED_MESSAGE_COUNT, 96u);//Shared mem capped to ~96 messages performs best for 60,100 radial neighbours, makes less of a difference at 200+, why?
 		CUDA_CALL(cudaMemcpyToSymbol(d_SHARED_MESSAGE_COUNT, &SHARED_MESSAGE_COUNT, sizeof(unsigned int)));
