@@ -53,7 +53,7 @@ void log(std::ofstream &f,
 __device__ __constant__ unsigned int d_agentCount;
 __device__ __constant__ float d_environmentWidth_float;
 __device__ __constant__ unsigned int d_gridDim;
-glm::uvec2 GRID_DIMS;
+glm::uvec3 GRID_DIMS;
 __device__ __constant__ float d_gridDim_float;
 __device__ __constant__ float d_RADIUS;
 __device__ __constant__ float d_R_SIN_45;
@@ -69,7 +69,7 @@ unsigned int PBM_max_count = 0;
 unsigned int PBM_max_Moore_count = 0;
 unsigned int MAX_THREADS_PER_BLOCK = 0;
 
-texture<float2> d_texMessages;
+texture<float4> d_texMessages;
 texture<unsigned int> d_texPBM;
 
 __global__ void init_curand(curandState *state, unsigned long long seed) {
@@ -77,7 +77,7 @@ __global__ void init_curand(curandState *state, unsigned long long seed) {
 	if (id < d_agentCount)
 		curand_init(seed, id, 0, &state[id]);
 }
-__global__ void init_agents(curandState *state, glm::vec2 *locationMessages) {
+__global__ void init_agents(curandState *state, glm::vec4 *locationMessages) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= d_agentCount)
 		return;
@@ -85,28 +85,30 @@ __global__ void init_agents(curandState *state, glm::vec2 *locationMessages) {
 	//negate and  + 1.0, to make  0<=x<1.0
 	locationMessages[id].x = (-curand_uniform(&state[id]) + 1.0f)*d_environmentWidth_float;
 	locationMessages[id].y = (-curand_uniform(&state[id]) + 1.0f)*d_environmentWidth_float;
+	locationMessages[id].z = (-curand_uniform(&state[id]) + 1.0f)*d_environmentWidth_float;
 }
-__device__ __forceinline__ glm::ivec2 getGridPosition(glm::vec2 worldPos)
+__device__ __forceinline__ glm::ivec3 getGridPosition(glm::vec3 worldPos)
 {
 	//Clamp each grid coord to 0<=x<dim
-	return clamp(floor((worldPos / d_environmentWidth_float)*d_gridDim_float), glm::vec2(0), glm::vec2((float)d_gridDim - 1));
+	return clamp(floor((worldPos / d_environmentWidth_float)*d_gridDim_float), glm::vec3(0), glm::vec3((float)d_gridDim - 1));
 }
-__device__ __forceinline__ unsigned int getHash(glm::ivec2 gridPos)
+__device__ __forceinline__ unsigned int getHash(glm::ivec3 gridPos)
 {
 	//Bound gridPos to gridDimensions
-	gridPos = clamp(gridPos, glm::ivec2(0), glm::ivec2(d_gridDim - 1));
+	gridPos = clamp(gridPos, glm::ivec3(0), glm::ivec3(d_gridDim - 1));
 	//Compute hash (effectivley an index for to a bin within the partitioning grid in this case)
 	return (unsigned int)(
+		(gridPos.z * d_gridDim * d_gridDim) +		//z
 		(gridPos.y * d_gridDim) +					//y
 		gridPos.x); 	                            //x
 }
-__global__ void atomicHistogram(unsigned int* bin_index, unsigned int* bin_sub_index, unsigned int *pbm_counts, glm::vec2 *messageBuffer)
+__global__ void atomicHistogram(unsigned int* bin_index, unsigned int* bin_sub_index, unsigned int *pbm_counts, glm::vec4 *messageBuffer)
 {
 	unsigned int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 	//Kill excess threads
 	if (index >= d_agentCount) return;
 
-	glm::ivec2 gridPos = getGridPosition(messageBuffer[index]);
+	glm::ivec3 gridPos = getGridPosition(messageBuffer[index]);
 	unsigned int hash = getHash(gridPos);
 	bin_index[index] = hash;
 	unsigned int bin_idx = atomicInc((unsigned int*)&pbm_counts[hash], 0xFFFFFFFF);
@@ -116,8 +118,8 @@ __global__ void reorderLocationMessages(
 	unsigned int* bin_index,
 	unsigned int* bin_sub_index,
 	unsigned int *pbm,
-	glm::vec2 *unordered_messages,
-	glm::vec2 *ordered_messages
+	glm::vec4 *unordered_messages,
+	glm::vec4 *ordered_messages
 )
 {
 	unsigned int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -132,7 +134,7 @@ __global__ void reorderLocationMessages(
 }
 int requiredSM(int blockSize)
 {
-	return (SHARED_MESSAGE_COUNT*sizeof(float2))+(6*sizeof(unsigned int));//Need to limit this to the max SM
+	return (SHARED_MESSAGE_COUNT*sizeof(float3))+(18*sizeof(unsigned int));//Need to limit this to the max SM
 }
 /**
 * Kernel must be launched 1 block per bin
@@ -233,17 +235,16 @@ out[index].z = pos.z + average.z;
  * This removes the necessity of __launch_bounds__(64) as all threads in block are touching the same messages
  * However we end up with alot of (mostly) idle threads if one bin dense, others empty.
  */
-__global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
+__global__ void neighbourSearch(const glm::vec4 *agents, glm::vec4 *out)
 {
-	extern __shared__ float2 sm_messages[];
+	extern __shared__ float3 sm_messages[];
 	unsigned int *stripStarts = (unsigned int *)&sm_messages[d_SHARED_MESSAGE_COUNT];
-	unsigned int *stripCounts = &stripStarts[3];
-
-
+	unsigned int *stripCounts = &stripStarts[9];
+	
 	//My data
-	glm::ivec2 myBin = glm::ivec2(blockIdx.x, blockIdx.y);
+	glm::ivec3 myBin = glm::ivec3(blockIdx.x / d_gridDim, blockIdx.x % d_gridDim, blockIdx.y);
 	unsigned int index = UINT_MAX;
-	glm::vec2 pos;
+	glm::vec3 pos;
 	{
 		unsigned int binHash = getHash(myBin);
 		unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
@@ -252,24 +253,26 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 		if (threadIdx.x < binCount)
 		{
 			index = binStart + threadIdx.x;
-			pos = agents[index];
+			pos = *(glm::vec3*)&agents[index];
 		}
 	}
 	//PBM data?
-	//First 3 threads fill stripStarts/stripCounts, by loading data for relevant strips
-	if(threadIdx.x<3)
+	//First 9 threads fill stripStarts/stripCounts, by loading data for relevant strips
+	if(threadIdx.x<9)
 	{
-		int myY = myBin.y + ((int)threadIdx.x) - 1;
-		if (myY >= 0 && myY < d_gridDim)
+		int myY = myBin.y + ((int)threadIdx.x%3) - 1;
+		int myZ = myBin.z + ((int)threadIdx.x/3) - 1;
+		if (myY >= 0 && myY < d_gridDim
+	     && myZ >= 0 && myZ < d_gridDim)
 		{
 			int currentBinX = myBin.x - 1;
 			currentBinX = currentBinX >= 0 ? currentBinX : 0;
-			unsigned int binHash = getHash(glm::ivec2(currentBinX, myY));
+			unsigned int binHash = getHash(glm::ivec3(currentBinX, myY, myZ));
 			unsigned int binStart = tex1Dfetch(d_texPBM, binHash);
 			stripStarts[threadIdx.x] = binStart;
 			currentBinX = myBin.x + 1;
 			currentBinX = currentBinX < d_gridDim ? currentBinX : d_gridDim - 1;
-			binHash = getHash(glm::ivec2(currentBinX, myY));
+			binHash = getHash(glm::ivec3(currentBinX, myY, myZ));
 			unsigned int binEnd = tex1Dfetch(d_texPBM, binHash + 1);
 			stripCounts[threadIdx.x] = binEnd - binStart;
 		}
@@ -278,14 +281,24 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 	}
 	__syncthreads();
 
-	const unsigned int TOTAL_LOAD_COUNT = stripCounts[0] + stripCounts[1] + stripCounts[2];
+	//Could maybe improve this reduction/sum with warp shuffle/_syncthreads
+	const unsigned int TOTAL_LOAD_COUNT = 
+	  stripCounts[0]
+	+ stripCounts[1] 
+	+ stripCounts[2] 
+	+ stripCounts[3] 
+	+ stripCounts[4] 
+	+ stripCounts[5] 
+	+ stripCounts[6] 
+	+ stripCounts[7] 
+	+ stripCounts[8];
 
 	//if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
 	//	printf("Total loads due: %d [%d, %d, %d]\n", TOTAL_LOAD_COUNT, stripCounts[0], stripCounts[1], stripCounts[2]);
 	{
 		//Model data
 		unsigned int count = 0;
-		glm::vec2 average = glm::vec2(0);
+		glm::vec3 average = glm::vec3(0);
 		//Loading data
 		unsigned int myStrip = 0;
 		int myLoad = threadIdx.x;
@@ -294,7 +307,7 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 		for(unsigned int blockLoad = 0; blockLoad<TOTAL_LOAD_COUNT; blockLoad += d_SHARED_MESSAGE_COUNT)
 		{
 			//Load the corresponding message if available
-			if(threadIdx.x < d_SHARED_MESSAGE_COUNT && myStrip < 3)
+			if(threadIdx.x < d_SHARED_MESSAGE_COUNT && myStrip < 9)
 			{
 				//Get us pointing to a valid index in a valid strip
 				unsigned int stripCount = stripCounts[myStrip];
@@ -306,16 +319,17 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 					//Switch to next strip
 					myStrip++;
 					//update stripCount
-					if (myStrip < 3)
+					if (myStrip < 9)
 						stripCount = stripCounts[myStrip];
 					else
 						break;//Escape we've exceeded last strip
 				}
 				//If we're still valid
-				if (myStrip < 3)
+				if (myStrip < 9)
 				{
 					//Load Message
-					sm_messages[threadIdx.x] = tex1Dfetch(d_texMessages, stripStarts[myStrip] + myLoad);
+					float4 _t = tex1Dfetch(d_texMessages, stripStarts[myStrip] + myLoad);
+					sm_messages[threadIdx.x] = *(float3*)&_t;
 					//if (blockIdx.x == 3 && blockIdx.y == 3)
 					//	printf("(%.3f, %.3f) = %d:%d\n", sm_messages[threadIdx.x].x, sm_messages[threadIdx.x].y, myStrip, myLoad);
 					//Prep for next loop
@@ -330,14 +344,14 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 				unsigned int blockLeft = min(TOTAL_LOAD_COUNT - blockLoad, d_SHARED_MESSAGE_COUNT);//Either loop all messages, or remaining messages
 				for (unsigned int i = 0; i<blockLeft; ++i)
 				{
-					float2 message = sm_messages[i];
+					float3 message = sm_messages[i];
 					//if (blockIdx.x == 2 && blockIdx.y == 0 && threadIdx.x == 0)
 					//	printf("(%.3f, %.3f)\n", message.x, message.y);
 #ifndef CIRCLES
-					if (distance(*(glm::vec2*)&message, pos)<d_RADIUS)
+					if (distance(*(glm::vec3*)&message, pos)<d_RADIUS)
 					{
 						//message.z = pow(sqrt(sin(distance(message, pos))),3.1f);//Bonus compute
-						average += *(glm::vec2*)&message;
+						average += *(glm::vec3*)&message;
 						count++;
 					}
 #else
@@ -365,9 +379,13 @@ __global__ void neighbourSearch(const glm::vec2 *agents, glm::vec2 *out)
 		{
 #ifndef CIRCLES
 			average /= count>0 ? count : 1;
-			out[index] = average;
+			out[index].x = average.x;
+			out[index].y = average.y;
+			out[index].z = average.z;
 #else
-			out[index] = pos + average;
+			out[index].x = pos.x + average.x;
+			out[index].y = pos.y + average.y;
+			out[index].z = pos.z + average.z;
 #endif
 		}
 	}
@@ -379,8 +397,8 @@ __global__ void unsortMessages(
 	unsigned int* bin_index,
 	unsigned int* bin_sub_index,
 	unsigned int *pbm,
-	glm::vec2 *ordered_messages,
-	glm::vec2 *unordered_messages
+	glm::vec4 *ordered_messages,
+	glm::vec4 *unordered_messages
 )
 {
 	unsigned int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -406,16 +424,17 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 	//const unsigned int ENV_WIDTH = 250;
 	float ENV_WIDTH_float = (float)ENV_WIDTH;
 	const unsigned int RNG_SEED = 12;
-	const unsigned int ENV_VOLUME = ENV_WIDTH * ENV_WIDTH;
+	const unsigned int ENV_VOLUME = ENV_WIDTH * ENV_WIDTH * ENV_WIDTH;
 	CUDA_CALL(cudaMemcpyToSymbol(d_agentCount, &AGENT_COUNT, sizeof(unsigned int)));
 	CUDA_CALL(cudaMemcpyToSymbol(d_environmentWidth_float, &ENV_WIDTH_float, sizeof(float)));
-	glm::vec2 *d_agents_init = nullptr, *d_agents = nullptr, *d_out = nullptr;
+	//vec4 used instead of vec3 bc texture memory reqs
+	glm::vec4 *d_agents_init = nullptr, *d_agents = nullptr, *d_out = nullptr;
 	unsigned int *d_keys = nullptr, *d_vals = nullptr;
-	CUDA_CALL(cudaMalloc(&d_agents_init, sizeof(glm::vec2) * AGENT_COUNT));
-	CUDA_CALL(cudaMalloc(&d_agents, sizeof(glm::vec2) * AGENT_COUNT));
-	CUDA_CALL(cudaMalloc(&d_out, sizeof(glm::vec2) * AGENT_COUNT));
-	glm::vec2 *h_out = (glm::vec2*)malloc(sizeof(glm::vec2) * AGENT_COUNT);
-	glm::vec2 *h_out_control = (glm::vec2*)malloc(sizeof(glm::vec2) * AGENT_COUNT);
+	CUDA_CALL(cudaMalloc(&d_agents_init, sizeof(glm::vec4) * AGENT_COUNT));
+	CUDA_CALL(cudaMalloc(&d_agents, sizeof(glm::vec4) * AGENT_COUNT));
+	CUDA_CALL(cudaMalloc(&d_out, sizeof(glm::vec4) * AGENT_COUNT));
+	glm::vec4 *h_out = (glm::vec4*)malloc(sizeof(glm::vec4) * AGENT_COUNT);
+	glm::vec4 *h_out_control = (glm::vec4*)malloc(sizeof(glm::vec4) * AGENT_COUNT);
 	//Init agents
 	{
 		//Generate curand
@@ -436,7 +455,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 	//Decide interaction radius
 	//for a range of bin widths
 	const float RADIUS = 1.0f;//
-	const float RADIAL_VOLUME = glm::pi<float>()*RADIUS*RADIUS;
+	const float RADIAL_VOLUME = glm::pi<float>()*RADIUS*RADIUS*RADIUS*(4.0f / 3.0f);
 	const unsigned int AVERAGE_NEIGHBOURS = (unsigned int)(AGENT_COUNT*RADIAL_VOLUME / ENV_VOLUME);
 	printf("Agents: %d, RVol: %.2f, Average Neighbours: %d\n", AGENT_COUNT, RADIAL_VOLUME, AVERAGE_NEIGHBOURS);
 	//{
@@ -454,7 +473,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 		cudaGetDeviceProperties(&dp, device);
 		//We could use dp.sharedMemPerBlock/N to improve occupancy
 		//6uint are used for storing sync info
-		SHARED_MESSAGE_COUNT = (dp.sharedMemPerBlock-(sizeof(unsigned int)*6)) / sizeof(float2);
+		SHARED_MESSAGE_COUNT = (dp.sharedMemPerBlock-(sizeof(unsigned int)*18)) / sizeof(float3);
 		//Why the fuck is this capped to 256?
 		SHARED_MESSAGE_COUNT = glm::min(SHARED_MESSAGE_COUNT, 96u);//Shared mem capped to ~96 messages performs best for 60,100 radial neighbours, makes less of a difference at 200+, why?
 		CUDA_CALL(cudaMemcpyToSymbol(d_SHARED_MESSAGE_COUNT, &SHARED_MESSAGE_COUNT, sizeof(unsigned int)));
@@ -467,12 +486,12 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 	{
 		{
 			//Copy init state to d_out   
-			CUDA_CALL(cudaMemcpy(d_out, d_agents_init, sizeof(glm::vec2)*AGENT_COUNT, cudaMemcpyDeviceToDevice));
+			CUDA_CALL(cudaMemcpy(d_out, d_agents_init, sizeof(glm::vec4)*AGENT_COUNT, cudaMemcpyDeviceToDevice));
 		}
 		//Decide bin width (as a ratio to radius)
 		const float BIN_WIDTH = RADIUS;
 		float GRID_DIMS_float = ENV_WIDTH / BIN_WIDTH;
-		GRID_DIMS = glm::uvec2((unsigned int)ceil(GRID_DIMS_float));
+		GRID_DIMS = glm::uvec3((unsigned int)ceil(GRID_DIMS_float));
 		CUDA_CALL(cudaMemcpyToSymbol(d_binWidth, &BIN_WIDTH, sizeof(float)));
 		CUDA_CALL(cudaMemcpyToSymbol(d_gridDim, &GRID_DIMS.x, sizeof(unsigned int)));
 		CUDA_CALL(cudaMemcpyToSymbol(d_gridDim_float, &GRID_DIMS_float, sizeof(float)));
@@ -522,7 +541,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 			{
 				//Reset each run of average model
 #ifndef CIRCLES
-				CUDA_CALL(cudaMemcpy(d_out, d_agents_init, sizeof(glm::vec2)*AGENT_COUNT, cudaMemcpyDeviceToDevice));
+				CUDA_CALL(cudaMemcpy(d_out, d_agents_init, sizeof(glm::vec4)*AGENT_COUNT, cudaMemcpyDeviceToDevice));
 #endif	
 				cudaEventRecord(start_PBM);
 				{//Build atomic histogram
@@ -553,7 +572,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 					CUDA_CALL(cudaMemcpy(&PBM_max_count, d_PBM_max_count, sizeof(unsigned int), cudaMemcpyDeviceToHost));
 					assert(PBM_max_count < MAX_THREADS_PER_BLOCK);//Problems if this isn't true
 					//Calc moore size (bin size^dims?)
-					PBM_max_Moore_count = PBM_max_count*(unsigned int)pow(3, 2);//2==2D//Unused, requires 9x shared mem in 2D, 27x in 3D
+					PBM_max_Moore_count = PBM_max_count*(unsigned int)pow(3, 3);//2==2D//Unused, requires 9x shared mem in 2D, 27x in 3D
 					//CUDA_CALL(cudaMemcpyToSymbol(d_PBM_max_Moore_count, &PBM_max_Moore_count, sizeof(unsigned int)));
 					//Test
 					//SHARED_MESSAGE_COUNT = glm::min(PBM_max_count, SHARED_MESSAGE_COUNT);
@@ -562,7 +581,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 				}
 				{//Fill PBM and Message Texture Buffers																			  
 					CUDA_CALL(cudaDeviceSynchronize());//Wait for return
-					CUDA_CALL(cudaBindTexture(nullptr, d_texMessages, d_agents, sizeof(glm::vec2) * AGENT_COUNT));
+					CUDA_CALL(cudaBindTexture(nullptr, d_texMessages, d_agents, sizeof(glm::vec4) * AGENT_COUNT));
 					CUDA_CALL(cudaBindTexture(nullptr, d_texPBM, d_PBM, sizeof(unsigned int) * (BIN_COUNT + 1)));
 				}
 				cudaEventRecord(end_PBM);
@@ -584,9 +603,9 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 					//Each message samples radial neighbours (static model)
 					int blockSize = glm::max(PBM_max_count, SHARED_MESSAGE_COUNT);   //blockSize == largest bin size
 					dim3 gridSize;
-					gridSize.x = GRID_DIMS.x;
-					gridSize.y = GRID_DIMS.y;
-					gridSize.z = 1;// GRID_DIMS.z;
+					gridSize.x = GRID_DIMS.x*GRID_DIMS.y;
+					gridSize.y = GRID_DIMS.z;
+					gridSize.z = 1;
 					//Copy messages from d_agents to d_out, in hash order
 					printf("Test:\n");
 					neighbourSearch << <gridSize, blockSize, requiredSM(blockSize) >> > (d_agents, d_out);
@@ -626,14 +645,14 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 				CUDA_CHECK();
 				//Swap d_out and d_agents
 				{
-					glm::vec2 *t = d_out;
+					glm::vec4 *t = d_out;
 					d_out = d_agents;
 					d_agents = t;
 				}
 				//Wait for return
 				CUDA_CALL(cudaDeviceSynchronize());
 				//Copy back to relative host array (for validation)
-				CUDA_CALL(cudaMemcpy(isControl ? h_out_control : h_out, d_out, sizeof(glm::vec2)*AGENT_COUNT, cudaMemcpyDeviceToHost));
+				CUDA_CALL(cudaMemcpy(isControl ? h_out_control : h_out, d_out, sizeof(glm::vec4)*AGENT_COUNT, cudaMemcpyDeviceToHost));
 				CUDA_CALL(cudaDeviceSynchronize());
 			}
 		}//for(MODE)
@@ -654,16 +673,14 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 			//CUDA_CALL(cudaMemcpy(isControl ? h_out_control : h_out, d_out, sizeof(glm::vec2)*AGENT_COUNT, cudaMemcpyDeviceToHost));
 			for (unsigned int i = 0; i < AGENT_COUNT; ++i)
 			{
-				assert(!(isnan(h_out[i].x) || isnan(h_out[i].y)));
-				if (isnan(h_out[i].x) || isnan(h_out[i].y))
+				assert(!(isnan(h_out[i].x) || isnan(h_out[i].y) || isnan(h_out[i].z)));
+				if (isnan(h_out[i].x) || isnan(h_out[i].y) || isnan(h_out[i].z))
 					printf("err nan\n");
-				auto ret = glm::epsilonEqual(h_out[i], h_out_control[i], EPSILON);
-				if (!(ret.x&&ret.y))
+				auto ret = glm::epsilonEqual(glm::vec3(h_out[i]), glm::vec3(h_out_control[i]), EPSILON);
+				if (!(ret.x&&ret.y&&ret.z))
 				{
 					if (fails == 0)
-					{
-						printf("#%d  : (%.5f, %.5f) vs (%.5f, %.5f)\n", i, h_out_control[i].x, h_out_control[i].y, h_out[i].x, h_out[i].y);
-					}
+						printf("(%.5f, %.5f, %.5f) vs (%.5f, %.5f, %.5f)\n", h_out_control[i].x, h_out_control[i].y, h_out_control[i].z, h_out[i].x, h_out[i].y, h_out[i].z);
 					fails++;
 				}
 			}
@@ -672,6 +689,8 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 			else
 				printf("Validation passed %d/%d\n", AGENT_COUNT, AGENT_COUNT);
 		}
+#else
+		printf("Validation not ran for Circles mode.\n")
 #endif
 		log(f, AVERAGE_NEIGHBOURS, AGENT_COUNT, ENV_WIDTH, pbmMillis_control, kernelMillis_control, pbmMillis, kernelMillis, fails);
 	}
@@ -689,7 +708,7 @@ void run(std::ofstream &f, const unsigned int ENV_WIDTH, const unsigned int AGEN
 void runAgents(std::ofstream &f, const unsigned int AGENT_COUNT, const float DENSITY)
 {
 	//density refers to approximate number of neighbours
-	run(f, (unsigned int)sqrt(AGENT_COUNT / (DENSITY*2.86 / 9)), AGENT_COUNT);
+	run(f, (unsigned int)cbrt(AGENT_COUNT / (DENSITY*6.45 / 27)), AGENT_COUNT);
 }
 int main()
 {

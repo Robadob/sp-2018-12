@@ -9,6 +9,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "3D", "..\3D\3D.vcxproj", "{
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "2D_segmented", "..\2D_segmented\2D_segmented.vcxproj", "{6461FF81-68C5-4C1D-BD7F-F139167DD799}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "3D_segmented", "..\3D_segmented\3D_segmented.vcxproj", "{47F6A8BF-8FCF-4EA7-8AC4-7B92B335C2CD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -27,6 +29,10 @@ Global
 		{6461FF81-68C5-4C1D-BD7F-F139167DD799}.Debug|x64.Build.0 = Debug|x64
 		{6461FF81-68C5-4C1D-BD7F-F139167DD799}.Release|x64.ActiveCfg = Release|x64
 		{6461FF81-68C5-4C1D-BD7F-F139167DD799}.Release|x64.Build.0 = Release|x64
+		{47F6A8BF-8FCF-4EA7-8AC4-7B92B335C2CD}.Debug|x64.ActiveCfg = Debug|x64
+		{47F6A8BF-8FCF-4EA7-8AC4-7B92B335C2CD}.Debug|x64.Build.0 = Debug|x64
+		{47F6A8BF-8FCF-4EA7-8AC4-7B92B335C2CD}.Release|x64.ActiveCfg = Release|x64
+		{47F6A8BF-8FCF-4EA7-8AC4-7B92B335C2CD}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
